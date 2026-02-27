@@ -9,11 +9,11 @@ use gpui::{
 use rust_i18n::t;
 
 use crate::{
-    ActiveTheme, AxisExt, IconName, Placement, Selectable, Sizable,
+    ActiveTheme, AxisExt, Icon, IconName, Placement, Selectable, Size, Sizable,
     button::{Button, ButtonVariants as _},
     dock::PanelInfo,
     h_flex,
-    menu::{DropdownMenu, PopupMenu},
+    menu::{DropdownMenu, PopupMenu, PopupMenuItem},
     tab::{Tab, TabBar},
     v_flex,
 };
@@ -333,6 +333,97 @@ impl TabPanel {
         self.remove_self_if_empty(window, cx);
         cx.emit(PanelEvent::ZoomOut);
         cx.emit(PanelEvent::LayoutChanged);
+    }
+
+    fn panel_index(&self, panel: &Arc<dyn PanelView>) -> Option<usize> {
+        let target_view = panel.view();
+        self.panels.iter().position(|p| p.view() == target_view)
+    }
+
+    fn close_panel(
+        &mut self,
+        panel: &Arc<dyn PanelView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !panel.closable(cx) {
+            return;
+        }
+        self.remove_panel(panel.clone(), window, cx);
+    }
+
+    fn close_other_panels(
+        &mut self,
+        panel: &Arc<dyn PanelView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let keep_view = panel.view();
+        let to_close: Vec<_> = self
+            .panels
+            .iter()
+            .filter(|p| p.view() != keep_view && p.closable(cx))
+            .cloned()
+            .collect();
+        if to_close.is_empty() {
+            return;
+        }
+        for item in to_close {
+            self.detach_panel(item, window, cx);
+        }
+        if let Some(ix) = self
+            .panels
+            .iter()
+            .position(|p| p.view() == keep_view)
+        {
+            self.set_active_ix(ix, window, cx);
+        }
+        self.remove_self_if_empty(window, cx);
+        cx.emit(PanelEvent::LayoutChanged);
+        cx.notify();
+    }
+
+    fn close_tabs_to_right(
+        &mut self,
+        panel: &Arc<dyn PanelView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ix) = self.panel_index(panel) else {
+            return;
+        };
+        if ix + 1 >= self.panels.len() {
+            return;
+        }
+        let to_close: Vec<_> = self.panels[(ix + 1)..]
+            .iter()
+            .filter(|p| p.closable(cx))
+            .cloned()
+            .collect();
+        if to_close.is_empty() {
+            return;
+        }
+        for item in to_close {
+            self.detach_panel(item, window, cx);
+        }
+        self.set_active_ix(ix.min(self.panels.len().saturating_sub(1)), window, cx);
+        self.remove_self_if_empty(window, cx);
+        cx.emit(PanelEvent::LayoutChanged);
+        cx.notify();
+    }
+
+    fn menu_state(&self, panel: &Arc<dyn PanelView>, cx: &App) -> (bool, bool, bool) {
+        let can_close = panel.closable(cx);
+        let keep_view = panel.view();
+        let has_other = self
+            .panels
+            .iter()
+            .any(|p| p.view() != keep_view && p.closable(cx));
+        let has_right = self
+            .panel_index(panel)
+            .map(|ix| self.panels.iter().skip(ix + 1).any(|p| p.closable(cx)))
+            .unwrap_or(false);
+        (can_close, has_other, has_right)
     }
 
     fn detach_panel(
@@ -712,6 +803,8 @@ impl TabPanel {
             .children(self.panels.iter().enumerate().filter_map(|(ix, panel)| {
                 let mut active = state.active_panel.as_ref() == Some(panel);
                 let droppable = self.collapsed;
+                let panel_for_menu = panel.clone();
+                let can_close = panel.closable(cx);
 
                 if !panel.visible(cx) {
                     return None;
@@ -729,11 +822,37 @@ impl TabPanel {
                             this.right(px(1.))
                         })
                         .map(|this| {
-                            if let Some(tab_name) = panel.tab_name(cx) {
-                                this.child(tab_name)
+                            let close_button = Button::new(("tab-close", ix))
+                                .text()
+                                .with_size(Size::XSmall)
+                                .icon(
+                                    Icon::new(IconName::Close)
+                                        .text_color(cx.theme().muted_foreground),
+                                )
+                                .on_click({
+                                    let panel = panel.clone();
+                                    let tab_panel = view.clone();
+                                    move |_, window, cx| {
+                                        cx.stop_propagation();
+                                        let _ = tab_panel.update(cx, |view, cx| {
+                                            view.remove_panel(panel.clone(), window, cx);
+                                        });
+                                    }
+                                });
+                            let label_content = if let Some(tab_name) = panel.tab_name(cx) {
+                                tab_name.into_any_element()
                             } else {
-                                this.child(panel.title(window, cx))
-                            }
+                                panel.title(window, cx)
+                            };
+                            let label = h_flex()
+                                .items_center()
+                                .gap_1()
+                                .child(label_content)
+                                .when(active && can_close, |this| {
+                                    this.child(div().flex_none().child(close_button))
+                                })
+                                .into_any_element();
+                            this.child(label)
                         })
                         .selected(active)
                         .on_click(cx.listener({
@@ -776,6 +895,53 @@ impl TabPanel {
                             })
                         }),
                 )
+                .map(|tab| {
+                    let tab_panel = view.clone();
+                    tab.context_menu(move |menu, _window, cx| {
+                        let (can_close, has_other, has_right) = tab_panel
+                            .read(cx)
+                            .menu_state(&panel_for_menu, cx);
+                        let close_item = PopupMenuItem::new(t!("Dock.Close"))
+                            .disabled(!can_close)
+                            .on_click({
+                                let panel = panel_for_menu.clone();
+                                let tab_panel = tab_panel.clone();
+                                move |_, window, cx| {
+                                    let _ = tab_panel.update(cx, |view, cx| {
+                                        view.close_panel(&panel, window, cx);
+                                    });
+                                }
+                            });
+                        let close_other_item = PopupMenuItem::new(t!("Dock.CloseOther"))
+                            .disabled(!has_other)
+                            .on_click({
+                                let panel = panel_for_menu.clone();
+                                let tab_panel = tab_panel.clone();
+                                move |_, window, cx| {
+                                    let _ = tab_panel.update(cx, |view, cx| {
+                                        view.close_other_panels(&panel, window, cx);
+                                    });
+                                }
+                            });
+                        let close_right_item =
+                            PopupMenuItem::new(t!("Dock.CloseTabsToTheRight"))
+                                .disabled(!has_right)
+                                .on_click({
+                                    let panel = panel_for_menu.clone();
+                                    let tab_panel = tab_panel.clone();
+                                    move |_, window, cx| {
+                                        let _ = tab_panel.update(cx, |view, cx| {
+                                            view.close_tabs_to_right(&panel, window, cx);
+                                        });
+                                    }
+                                });
+
+                        menu.item(close_item)
+                            .item(PopupMenuItem::separator())
+                            .item(close_other_item)
+                            .item(close_right_item)
+                    })
+                })
             }))
             .last_empty_space(
                 // empty space to allow move to last tab right

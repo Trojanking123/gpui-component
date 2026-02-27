@@ -1,9 +1,13 @@
 use std::rc::Rc;
 
-use crate::{h_flex, ActiveTheme, Icon, IconName, Selectable, Sizable, Size, StyledExt};
+use crate::{
+    h_flex,
+    menu::{ContextMenuExt, PopupMenu},
+    ActiveTheme, Icon, IconName, Selectable, Sizable, Size, StyledExt,
+};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    div, px, relative, AnyElement, App, ClickEvent, Div, Edges, ElementId, Hsla,
+    div, px, relative, AnyElement, App, ClickEvent, Context, Div, Edges, ElementId, Hsla,
     InteractiveElement, IntoElement, ParentElement, Pixels, RenderOnce, SharedString,
     StatefulInteractiveElement, Styled, Window,
 };
@@ -394,6 +398,7 @@ pub struct Tab {
     pub(super) disabled: bool,
     pub(super) selected: bool,
     on_click: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
+    context_menu: Option<Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>>,
 }
 
 impl From<&'static str> for Tab {
@@ -441,6 +446,7 @@ impl Default for Tab {
             variant: TabVariant::default(),
             size: Size::default(),
             on_click: None,
+            context_menu: None,
         }
     }
 }
@@ -520,6 +526,15 @@ impl Tab {
         self
     }
 
+    /// Set context menu for the tab.
+    pub fn context_menu(
+        mut self,
+        menu: impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static,
+    ) -> Self {
+        self.context_menu = Some(Rc::new(menu));
+        self
+    }
+
     /// Set id to the tab.
     pub(super) fn id(mut self, id: impl Into<ElementId>) -> Self {
         self.id = id.into();
@@ -582,7 +597,8 @@ impl RenderOnce for Tab {
         let inner_height = self.variant.inner_height(self.size);
         let height = self.variant.height(self.size);
 
-        self.base
+        let base = self
+            .base
             .id(self.id)
             .flex()
             .flex_wrap()
@@ -659,6 +675,14 @@ impl RenderOnce for Tab {
                 this.when_some(self.on_click.clone(), |this, on_click| {
                     this.on_click(move |event, window, cx| on_click(event, window, cx))
                 })
-            })
+            });
+
+        if let Some(menu) = self.context_menu {
+            return base
+                .context_menu(move |popup, window, cx| menu(popup, window, cx))
+                .into_any_element();
+        }
+
+        base.into_any_element()
     }
 }
