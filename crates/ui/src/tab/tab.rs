@@ -1,11 +1,15 @@
 use std::rc::Rc;
 
-use crate::{ActiveTheme, Icon, IconName, Selectable, Sizable, Size, StyledExt, h_flex};
+use crate::{
+    h_flex,
+    menu::{ContextMenuExt, PopupMenu},
+    ActiveTheme, Icon, IconName, Selectable, Sizable, Size, StyledExt,
+};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, ClickEvent, Div, Edges, Hsla, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement, Styled, Window,
-    div, px, relative,
+    div, px, relative, AnyElement, App, ClickEvent, Context, Div, Edges, ElementId, Hsla,
+    InteractiveElement, IntoElement, ParentElement, Pixels, RenderOnce, SharedString,
+    StatefulInteractiveElement, Styled, Window,
 };
 
 /// Tab variants.
@@ -17,6 +21,33 @@ pub enum TabVariant {
     Pill,
     Segmented,
     Underline,
+}
+
+#[allow(dead_code)]
+struct TabStyle {
+    borders: Edges<Pixels>,
+    border_color: Hsla,
+    bg: Hsla,
+    fg: Hsla,
+    radius: Pixels,
+    shadow: bool,
+    inner_bg: Hsla,
+    inner_radius: Pixels,
+}
+
+impl Default for TabStyle {
+    fn default() -> Self {
+        TabStyle {
+            borders: Edges::all(px(0.)),
+            border_color: gpui::transparent_white(),
+            bg: gpui::transparent_white(),
+            fg: gpui::transparent_white(),
+            radius: px(0.),
+            shadow: false,
+            inner_bg: gpui::transparent_white(),
+            inner_radius: px(0.),
+        }
+    }
 }
 
 impl TabVariant {
@@ -50,7 +81,7 @@ impl TabVariant {
             },
             Size::Small => match self {
                 TabVariant::Tab | TabVariant::Outline | TabVariant::Pill => px(22.),
-                TabVariant::Segmented => px(18.),
+                TabVariant::Segmented => px(20.),
                 TabVariant::Underline => px(22.),
             },
             Size::Large => match self {
@@ -130,6 +161,7 @@ impl TabVariant {
                 fg: cx.theme().tab_foreground,
                 bg: cx.theme().transparent,
                 borders: Edges {
+                    top: px(1.),
                     left: px(1.),
                     right: px(1.),
                     ..Default::default()
@@ -142,22 +174,27 @@ impl TabVariant {
                 bg: cx.theme().transparent,
                 borders: Edges::all(px(1.)),
                 border_color: cx.theme().border,
+                radius: px(99.),
                 ..Default::default()
             },
             TabVariant::Pill => TabStyle {
                 fg: cx.theme().foreground,
                 bg: cx.theme().transparent,
+                radius: px(99.),
                 ..Default::default()
             },
             TabVariant::Segmented => TabStyle {
                 fg: cx.theme().tab_foreground,
                 bg: cx.theme().transparent,
+                inner_radius: cx.theme().radius,
                 ..Default::default()
             },
             TabVariant::Underline => TabStyle {
                 fg: cx.theme().tab_foreground,
                 bg: cx.theme().transparent,
+                radius: px(0.),
                 inner_bg: cx.theme().transparent,
+                inner_radius: cx.theme().radius,
                 borders: Edges {
                     bottom: px(2.),
                     ..Default::default()
@@ -174,6 +211,7 @@ impl TabVariant {
                 fg: cx.theme().tab_foreground,
                 bg: cx.theme().transparent,
                 borders: Edges {
+                    top: px(1.),
                     left: px(1.),
                     right: px(1.),
                     ..Default::default()
@@ -186,11 +224,13 @@ impl TabVariant {
                 bg: cx.theme().secondary_hover,
                 borders: Edges::all(px(1.)),
                 border_color: cx.theme().border,
+                radius: px(99.),
                 ..Default::default()
             },
             TabVariant::Pill => TabStyle {
                 fg: cx.theme().secondary_foreground,
                 bg: cx.theme().secondary,
+                radius: px(99.),
                 ..Default::default()
             },
             TabVariant::Segmented => TabStyle {
@@ -201,12 +241,15 @@ impl TabVariant {
                 } else {
                     cx.theme().transparent
                 },
+                inner_radius: cx.theme().radius,
                 ..Default::default()
             },
             TabVariant::Underline => TabStyle {
                 fg: cx.theme().tab_foreground,
                 bg: cx.theme().transparent,
+                radius: px(0.),
                 inner_bg: cx.theme().transparent,
+                inner_radius: cx.theme().radius,
                 borders: Edges {
                     bottom: px(2.),
                     ..Default::default()
@@ -223,6 +266,7 @@ impl TabVariant {
                 fg: cx.theme().tab_active_foreground,
                 bg: cx.theme().tab_active,
                 borders: Edges {
+                    top: px(1.),
                     left: px(1.),
                     right: px(1.),
                     ..Default::default()
@@ -235,16 +279,19 @@ impl TabVariant {
                 bg: cx.theme().transparent,
                 borders: Edges::all(px(1.)),
                 border_color: cx.theme().primary,
+                radius: px(99.),
                 ..Default::default()
             },
             TabVariant::Pill => TabStyle {
                 fg: cx.theme().primary_foreground,
                 bg: cx.theme().primary,
+                radius: px(99.),
                 ..Default::default()
             },
             TabVariant::Segmented => TabStyle {
                 fg: cx.theme().tab_active_foreground,
                 bg: cx.theme().transparent,
+                inner_radius: cx.theme().radius,
                 inner_bg: cx.theme().background,
                 shadow: true,
                 ..Default::default()
@@ -273,6 +320,7 @@ impl TabVariant {
                     cx.theme().transparent
                 },
                 borders: Edges {
+                    top: px(1.),
                     left: px(1.),
                     right: px(1.),
                     ..Default::default()
@@ -288,6 +336,7 @@ impl TabVariant {
                 } else {
                     cx.theme().border
                 },
+                radius: px(99.),
                 ..Default::default()
             },
             TabVariant::Pill => TabStyle {
@@ -301,6 +350,7 @@ impl TabVariant {
                 } else {
                     cx.theme().transparent
                 },
+                radius: px(99.),
                 ..Default::default()
             },
             TabVariant::Segmented => TabStyle {
@@ -311,11 +361,13 @@ impl TabVariant {
                 } else {
                     cx.theme().transparent
                 },
+                inner_radius: cx.theme().radius,
                 ..Default::default()
             },
             TabVariant::Underline => TabStyle {
                 fg: cx.theme().muted_foreground,
                 bg: cx.theme().transparent,
+                radius: cx.theme().radius,
                 border_color: if selected {
                     cx.theme().border
                 } else {
@@ -329,74 +381,16 @@ impl TabVariant {
             },
         }
     }
-
-    pub(super) fn tab_bar_radius(&self, size: Size, cx: &App) -> Pixels {
-        if *self != TabVariant::Segmented {
-            return px(0.);
-        }
-
-        match size {
-            Size::XSmall | Size::Small => cx.theme().radius,
-            Size::Large => cx.theme().radius_lg,
-            _ => cx.theme().radius_lg,
-        }
-    }
-
-    fn radius(&self, size: Size, cx: &App) -> Pixels {
-        match self {
-            TabVariant::Outline | TabVariant::Pill => px(99.),
-            TabVariant::Segmented => match size {
-                Size::XSmall | Size::Small => cx.theme().radius,
-                Size::Large => cx.theme().radius_lg,
-                _ => cx.theme().radius_lg,
-            },
-            _ => px(0.),
-        }
-    }
-
-    fn inner_radius(&self, size: Size, cx: &App) -> Pixels {
-        match self {
-            TabVariant::Segmented => match size {
-                Size::Large => self.tab_bar_radius(size, cx) - px(3.),
-                _ => self.tab_bar_radius(size, cx) - px(2.),
-            },
-            _ => px(0.),
-        }
-    }
-}
-
-#[allow(dead_code)]
-struct TabStyle {
-    borders: Edges<Pixels>,
-    border_color: Hsla,
-    bg: Hsla,
-    fg: Hsla,
-    shadow: bool,
-    inner_bg: Hsla,
-}
-
-impl Default for TabStyle {
-    fn default() -> Self {
-        TabStyle {
-            borders: Edges::all(px(0.)),
-            border_color: gpui::transparent_white(),
-            bg: gpui::transparent_white(),
-            fg: gpui::transparent_white(),
-            shadow: false,
-            inner_bg: gpui::transparent_white(),
-        }
-    }
 }
 
 /// A Tab element for the [`super::TabBar`].
 #[derive(IntoElement)]
 pub struct Tab {
-    ix: usize,
+    id: ElementId,
     base: Div,
     pub(super) label: Option<SharedString>,
     icon: Option<Icon>,
     prefix: Option<AnyElement>,
-    pub(super) tab_bar_prefix: Option<bool>,
     suffix: Option<AnyElement>,
     children: Vec<AnyElement>,
     variant: TabVariant,
@@ -404,6 +398,7 @@ pub struct Tab {
     pub(super) disabled: bool,
     pub(super) selected: bool,
     on_click: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
+    context_menu: Option<Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>>,
 }
 
 impl From<&'static str> for Tab {
@@ -439,11 +434,10 @@ impl From<IconName> for Tab {
 impl Default for Tab {
     fn default() -> Self {
         Self {
-            ix: 0,
+            id: ElementId::Integer(0),
             base: div(),
             label: None,
             icon: None,
-            tab_bar_prefix: None,
             children: Vec::new(),
             disabled: false,
             selected: false,
@@ -452,6 +446,7 @@ impl Default for Tab {
             variant: TabVariant::default(),
             size: Size::default(),
             on_click: None,
+            context_menu: None,
         }
     }
 }
@@ -531,15 +526,18 @@ impl Tab {
         self
     }
 
-    /// Set index to the tab.
-    pub(crate) fn ix(mut self, ix: usize) -> Self {
-        self.ix = ix;
+    /// Set context menu for the tab.
+    pub fn context_menu(
+        mut self,
+        menu: impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static,
+    ) -> Self {
+        self.context_menu = Some(Rc::new(menu));
         self
     }
 
-    /// Set if the tab bar has a prefix.
-    pub(crate) fn tab_bar_prefix(mut self, tab_bar_prefix: bool) -> Self {
-        self.tab_bar_prefix = Some(tab_bar_prefix);
+    /// Set id to the tab.
+    pub(super) fn id(mut self, id: impl Into<ElementId>) -> Self {
+        self.id = id.into();
         self
     }
 }
@@ -594,22 +592,14 @@ impl RenderOnce for Tab {
             tab_style = self.variant.disabled(self.selected, cx);
             hover_style = self.variant.disabled(self.selected, cx);
         }
-        let tab_bar_prefix = self.tab_bar_prefix.unwrap_or_default();
-        if !tab_bar_prefix {
-            if self.ix == 0 && self.variant == TabVariant::Tab {
-                tab_style.borders.left = px(0.);
-                hover_style.borders.left = px(0.);
-            }
-        }
-        let radius = self.variant.radius(self.size, cx);
-        let inner_radius = self.variant.inner_radius(self.size, cx);
         let inner_paddings = self.variant.inner_paddings(self.size);
         let inner_margins = self.variant.inner_margins(self.size);
         let inner_height = self.variant.inner_height(self.size);
         let height = self.variant.height(self.size);
 
-        self.base
-            .id(self.ix)
+        let base = self
+            .base
+            .id(self.id)
             .flex()
             .flex_wrap()
             .gap_1()
@@ -630,7 +620,7 @@ impl RenderOnce for Tab {
             .border_t(tab_style.borders.top)
             .border_b(tab_style.borders.bottom)
             .border_color(tab_style.border_color)
-            .rounded(radius)
+            .rounded(tab_style.radius)
             .when(!self.selected && !self.disabled, |this| {
                 this.hover(|this| {
                     this.text_color(hover_style.fg)
@@ -640,7 +630,7 @@ impl RenderOnce for Tab {
                         .border_t(hover_style.borders.top)
                         .border_b(hover_style.borders.bottom)
                         .border_color(hover_style.border_color)
-                        .rounded(radius)
+                        .rounded(tab_style.radius)
                 })
             })
             .when_some(self.prefix, |this, prefix| this.child(prefix))
@@ -673,20 +663,26 @@ impl RenderOnce for Tab {
                             .children(self.children),
                     })
                     .bg(tab_style.inner_bg)
-                    .rounded(inner_radius)
+                    .rounded(tab_style.inner_radius)
                     .when(tab_style.shadow, |this| this.shadow_xs())
-                    .hover(|this| this.bg(hover_style.inner_bg).rounded(inner_radius)),
+                    .hover(|this| {
+                        this.bg(hover_style.inner_bg)
+                            .rounded(hover_style.inner_radius)
+                    }),
             )
             .when_some(self.suffix, |this, suffix| this.child(suffix))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                // Stop propagation behavior, for works on TitleBar.
-                // https://github.com/longbridge/gpui-component/issues/1836
-                cx.stop_propagation();
-            })
             .when(!self.disabled, |this| {
                 this.when_some(self.on_click.clone(), |this, on_click| {
                     this.on_click(move |event, window, cx| on_click(event, window, cx))
                 })
-            })
+            });
+
+        if let Some(menu) = self.context_menu {
+            return base
+                .context_menu(move |popup, window, cx| menu(popup, window, cx))
+                .into_any_element();
+        }
+
+        base.into_any_element()
     }
 }

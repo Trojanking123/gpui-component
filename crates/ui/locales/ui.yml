@@ -118,6 +118,16 @@ Dock:
     zh-CN: 关闭
     zh-HK: 關閉
     it: Chiudi
+  CloseOther:
+    en: Close Other Tabs
+    zh-CN: 关闭其他标签
+    zh-HK: 關閉其他標籤
+    it: Chiudi altre schede
+  CloseTabsToTheRight:
+    en: Close Tabs to the Right
+    zh-CN: 关闭右侧标签
+    zh-HK: 關閉右側標籤
+    it: Chiudi schede a destra
   Zoom In:
     en: Zoom In
     zh-CN: 放大
