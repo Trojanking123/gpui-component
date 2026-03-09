@@ -381,16 +381,30 @@ impl TabVariant {
             },
         }
     }
+
+    pub(super) fn tab_bar_radius(&self, size: Size, cx: &App) -> Pixels {
+        if *self != TabVariant::Segmented {
+            return px(0.);
+        }
+
+        match size {
+            Size::XSmall | Size::Small => cx.theme().radius,
+            Size::Large => cx.theme().radius_lg,
+            _ => cx.theme().radius_lg,
+        }
+    }
 }
 
 /// A Tab element for the [`super::TabBar`].
 #[derive(IntoElement)]
 pub struct Tab {
+    ix: usize,
     id: ElementId,
     base: Div,
     pub(super) label: Option<SharedString>,
     icon: Option<Icon>,
     prefix: Option<AnyElement>,
+    pub(super) tab_bar_prefix: Option<bool>,
     suffix: Option<AnyElement>,
     children: Vec<AnyElement>,
     variant: TabVariant,
@@ -434,10 +448,12 @@ impl From<IconName> for Tab {
 impl Default for Tab {
     fn default() -> Self {
         Self {
+            ix: 0,
             id: ElementId::Integer(0),
             base: div(),
             label: None,
             icon: None,
+            tab_bar_prefix: None,
             children: Vec::new(),
             disabled: false,
             selected: false,
@@ -535,6 +551,19 @@ impl Tab {
         self
     }
 
+    /// Set index to the tab.
+    pub(crate) fn ix(mut self, ix: usize) -> Self {
+        self.ix = ix;
+        self.id = ElementId::Integer(ix as u64);
+        self
+    }
+
+    /// Set if the tab bar has a prefix.
+    pub(crate) fn tab_bar_prefix(mut self, tab_bar_prefix: bool) -> Self {
+        self.tab_bar_prefix = Some(tab_bar_prefix);
+        self
+    }
+
     /// Set id to the tab.
     pub(super) fn id(mut self, id: impl Into<ElementId>) -> Self {
         self.id = id.into();
@@ -591,6 +620,11 @@ impl RenderOnce for Tab {
         if self.disabled {
             tab_style = self.variant.disabled(self.selected, cx);
             hover_style = self.variant.disabled(self.selected, cx);
+        }
+        let tab_bar_prefix = self.tab_bar_prefix.unwrap_or_default();
+        if !tab_bar_prefix && self.ix == 0 && self.variant == TabVariant::Tab {
+            tab_style.borders.left = px(0.);
+            hover_style.borders.left = px(0.);
         }
         let inner_paddings = self.variant.inner_paddings(self.size);
         let inner_margins = self.variant.inner_margins(self.size);

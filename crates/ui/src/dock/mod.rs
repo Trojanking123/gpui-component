@@ -27,7 +27,7 @@ pub type TabContextMenuBuilder = dyn Fn(
     crate::menu::PopupMenu,
     TabContextMenuContext,
     &mut Window,
-    &mut App,
+    &mut Context<crate::menu::PopupMenu>,
 ) -> crate::menu::PopupMenu;
 
 pub(crate) fn init(cx: &mut App) {
@@ -595,7 +595,7 @@ impl DockArea {
                 crate::menu::PopupMenu,
                 TabContextMenuContext,
                 &mut Window,
-                &mut App,
+                &mut Context<crate::menu::PopupMenu>,
             ) -> crate::menu::PopupMenu
             + 'static,
     {
