@@ -12,7 +12,7 @@ use gpui::{
     EventEmitter, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
     SharedString, Styled, Subscription, WeakEntity, Window, actions, div, prelude::FluentBuilder,
 };
-use std::sync::Arc;
+use std::{rc::Rc, sync::Arc};
 
 pub use dock::*;
 pub use panel::*;
@@ -22,6 +22,13 @@ pub use tab_panel::*;
 pub use tiles::*;
 
 use crate::ElementExt;
+
+pub type TabContextMenuBuilder = dyn Fn(
+    crate::menu::PopupMenu,
+    TabContextMenuContext,
+    &mut Window,
+    &mut App,
+) -> crate::menu::PopupMenu;
 
 pub(crate) fn init(cx: &mut App) {
     PanelRegistry::init(cx);
@@ -69,6 +76,7 @@ pub struct DockArea {
 
     /// The panel style, default is [`PanelStyle::Default`](PanelStyle::Default).
     pub(crate) panel_style: PanelStyle,
+    pub(crate) tab_context_menu_builder: Option<Rc<TabContextMenuBuilder>>,
 
     _subscriptions: Vec<Subscription>,
 }
@@ -546,6 +554,7 @@ impl DockArea {
             toggle_button_visible: true,
             locked: false,
             panel_style: PanelStyle::default(),
+            tab_context_menu_builder: None,
             _subscriptions: vec![],
         };
 
@@ -577,6 +586,20 @@ impl DockArea {
     pub fn panel_style(mut self, style: PanelStyle) -> Self {
         self.panel_style = style;
         self
+    }
+
+    /// Set the builder used to construct tab context menus.
+    pub fn set_tab_context_menu_builder<F>(&mut self, builder: F)
+    where
+        F: Fn(
+                crate::menu::PopupMenu,
+                TabContextMenuContext,
+                &mut Window,
+                &mut App,
+            ) -> crate::menu::PopupMenu
+            + 'static,
+    {
+        self.tab_context_menu_builder = Some(Rc::new(builder));
     }
 
     /// Set version of the dock area.
