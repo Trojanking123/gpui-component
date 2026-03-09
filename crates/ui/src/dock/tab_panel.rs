@@ -13,7 +13,7 @@ use crate::{
     button::{Button, ButtonVariants as _},
     dock::PanelInfo,
     h_flex,
-    menu::{DropdownMenu, PopupMenu, PopupMenuItem},
+    menu::{DropdownMenu, PopupMenu},
     tab::{Tab, TabBar},
     v_flex,
 };
@@ -36,6 +36,15 @@ struct TabState {
 pub(crate) struct DragPanel {
     pub(crate) panel: Arc<dyn PanelView>,
     pub(crate) tab_panel: Entity<TabPanel>,
+}
+
+#[derive(Clone)]
+pub struct TabContextMenuContext {
+    pub tab_panel: Entity<TabPanel>,
+    pub target_panel: Arc<dyn PanelView>,
+    pub target_index: usize,
+    pub active_index: usize,
+    pub tabs_len: usize,
 }
 
 impl DragPanel {
@@ -340,7 +349,7 @@ impl TabPanel {
         self.panels.iter().position(|p| p.view() == target_view)
     }
 
-    fn close_panel(
+    pub fn close_panel(
         &mut self,
         panel: &Arc<dyn PanelView>,
         window: &mut Window,
@@ -352,7 +361,7 @@ impl TabPanel {
         self.remove_panel(panel.clone(), window, cx);
     }
 
-    fn close_other_panels(
+    pub fn close_other_panels(
         &mut self,
         panel: &Arc<dyn PanelView>,
         window: &mut Window,
@@ -383,7 +392,7 @@ impl TabPanel {
         cx.notify();
     }
 
-    fn close_tabs_to_right(
+    pub fn close_tabs_to_right(
         &mut self,
         panel: &Arc<dyn PanelView>,
         window: &mut Window,
@@ -412,18 +421,23 @@ impl TabPanel {
         cx.notify();
     }
 
-    fn menu_state(&self, panel: &Arc<dyn PanelView>, cx: &App) -> (bool, bool, bool) {
-        let can_close = panel.closable(cx);
-        let keep_view = panel.view();
-        let has_other = self
-            .panels
-            .iter()
-            .any(|p| p.view() != keep_view && p.closable(cx));
-        let has_right = self
-            .panel_index(panel)
-            .map(|ix| self.panels.iter().skip(ix + 1).any(|p| p.closable(cx)))
-            .unwrap_or(false);
-        (can_close, has_other, has_right)
+    pub fn panels_snapshot(&self) -> Vec<Arc<dyn PanelView>> {
+        self.panels.clone()
+    }
+
+    fn menu_context(
+        &self,
+        tab_panel: Entity<TabPanel>,
+        panel: Arc<dyn PanelView>,
+    ) -> Option<TabContextMenuContext> {
+        let target_index = self.panel_index(&panel)?;
+        Some(TabContextMenuContext {
+            tab_panel,
+            target_panel: panel,
+            target_index,
+            active_index: self.active_ix,
+            tabs_len: self.panels.len(),
+        })
     }
 
     fn detach_panel(
@@ -897,49 +911,20 @@ impl TabPanel {
                 )
                 .map(|tab| {
                     let tab_panel = view.clone();
-                    tab.context_menu(move |menu, _window, cx| {
-                        let (can_close, has_other, has_right) = tab_panel
+                    tab.context_menu(move |menu, window, cx| {
+                        let context = tab_panel
                             .read(cx)
-                            .menu_state(&panel_for_menu, cx);
-                        let close_item = PopupMenuItem::new(t!("Dock.Close"))
-                            .disabled(!can_close)
-                            .on_click({
-                                let panel = panel_for_menu.clone();
-                                let tab_panel = tab_panel.clone();
-                                move |_, window, cx| {
-                                    let _ = tab_panel.update(cx, |view, cx| {
-                                        view.close_panel(&panel, window, cx);
-                                    });
-                                }
-                            });
-                        let close_other_item = PopupMenuItem::new(t!("Dock.CloseOther"))
-                            .disabled(!has_other)
-                            .on_click({
-                                let panel = panel_for_menu.clone();
-                                let tab_panel = tab_panel.clone();
-                                move |_, window, cx| {
-                                    let _ = tab_panel.update(cx, |view, cx| {
-                                        view.close_other_panels(&panel, window, cx);
-                                    });
-                                }
-                            });
-                        let close_right_item =
-                            PopupMenuItem::new(t!("Dock.CloseTabsToTheRight"))
-                                .disabled(!has_right)
-                                .on_click({
-                                    let panel = panel_for_menu.clone();
-                                    let tab_panel = tab_panel.clone();
-                                    move |_, window, cx| {
-                                        let _ = tab_panel.update(cx, |view, cx| {
-                                            view.close_tabs_to_right(&panel, window, cx);
-                                        });
-                                    }
-                                });
+                            .menu_context(tab_panel.clone(), panel_for_menu.clone());
+                        let builder = tab_panel
+                            .read(cx)
+                            .dock_area
+                            .upgrade()
+                            .and_then(|dock_area| dock_area.read(cx).tab_context_menu_builder.clone());
 
-                        menu.item(close_item)
-                            .item(PopupMenuItem::separator())
-                            .item(close_other_item)
-                            .item(close_right_item)
+                        match (context, builder) {
+                            (Some(context), Some(builder)) => builder(menu, context, window, cx),
+                            _ => menu,
+                        }
                     })
                 })
             }))
