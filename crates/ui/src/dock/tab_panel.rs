@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use gpui::{
-    App, AppContext, Context, Corner, DismissEvent, Div, DragMoveEvent, Empty, Entity,
+    App, AppContext, Context, DismissEvent, Div, DragMoveEvent, Empty, Entity,
     EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement,
     Pixels, Render, ScrollHandle, SharedString, StatefulInteractiveElement, StyleRefinement,
     Styled, WeakEntity, Window, div, prelude::FluentBuilder, px, relative, rems,
@@ -13,7 +13,7 @@ use crate::{
     button::{Button, ButtonVariants as _},
     dock::PanelInfo,
     h_flex,
-    menu::{DropdownMenu, PopupMenu},
+    menu::PopupMenu,
     tab::{Tab, TabBar},
     v_flex,
 };
@@ -25,7 +25,6 @@ use super::{
 
 #[derive(Clone)]
 struct TabState {
-    closable: bool,
     zoomable: Option<PanelControl>,
     draggable: bool,
     droppable: bool,
@@ -451,6 +450,15 @@ impl TabPanel {
         cx: &mut Context<Self>,
     ) {
         panel.on_removed(window, cx);
+        self.take_panel(panel, window, cx);
+    }
+
+    fn take_panel(
+        &mut self,
+        panel: Arc<dyn PanelView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let panel_view = panel.view();
         self.panels.retain(|p| p.view() != panel_view);
         if self.active_ix >= self.panels.len() {
@@ -550,7 +558,6 @@ impl TabPanel {
         }
 
         let zoomed = self.zoomed;
-        let view = cx.entity().clone();
         let zoomable_toolbar_visible = state.zoomable.map_or(false, |v| v.toolbar_visible());
 
         h_flex()
@@ -589,38 +596,6 @@ impl TabPanel {
                     this
                 }
             })
-            .child(
-                Button::new("menu")
-                    .icon(IconName::Ellipsis)
-                    .xsmall()
-                    .ghost()
-                    .tab_stop(false)
-                    .dropdown_menu({
-                        let zoomable = state.zoomable.map_or(false, |v| v.menu_visible());
-                        let closable = state.closable;
-
-                        move |menu, window, cx| {
-                            view.update(cx, |this, cx| {
-                                this.dropdown_menu(menu, window, cx)
-                                    .separator()
-                                    .menu_with_disabled(
-                                        if zoomed {
-                                            t!("Dock.Zoom Out")
-                                        } else {
-                                            t!("Dock.Zoom In")
-                                        },
-                                        Box::new(ToggleZoom),
-                                        !zoomable,
-                                    )
-                                    .when(closable, |this| {
-                                        this.separator()
-                                            .menu(t!("Dock.Close"), Box::new(ClosePanel))
-                                    })
-                            })
-                        }
-                    })
-                    .anchor(Corner::TopRight),
-            )
     }
 
     fn render_dock_toggle_button(
@@ -730,6 +705,13 @@ impl TabPanel {
 
         let panel_style = dock_area.read(cx).panel_style;
         let visible_panels = self.visible_panels(cx).collect::<Vec<_>>();
+        let active_title_suffix = self
+            .active_panel(cx)
+            .and_then(|panel| panel.title_suffix(window, cx));
+        let has_toolbar = self.zoomed
+            || state.zoomable.map_or(false, |v| v.toolbar_visible())
+            || self.toolbar_buttons(window, cx).is_some();
+        let show_suffix = active_title_suffix.is_some() || has_toolbar || right_dock_button.is_some();
 
         if visible_panels.len() == 1 && panel_style == PanelStyle::default() {
             let panel = visible_panels.get(0).unwrap();
@@ -955,7 +937,7 @@ impl TabPanel {
                         ))
                     }),
             )
-            .when(!self.collapsed, |this| {
+            .when(!self.collapsed && show_suffix, |this| {
                 this.suffix(
                     h_flex()
                         .items_center()
@@ -968,10 +950,7 @@ impl TabPanel {
                         .bg(cx.theme().tab_bar)
                         .px_2()
                         .gap_1()
-                        .children(
-                            self.active_panel(cx)
-                                .and_then(|panel| panel.title_suffix(window, cx)),
-                        )
+                        .children(active_title_suffix)
                         .child(self.render_toolbar(state, window, cx))
                         .when_some(right_dock_button, |this, btn| this.child(btn)),
                 )
@@ -993,13 +972,10 @@ impl TabPanel {
             return Empty {}.into_any_element();
         };
 
-        let is_render_in_tabs = self.panels.len() > 1 && self.inner_padding(cx);
-
         v_flex()
             .id("active-panel")
             .group("")
             .flex_1()
-            .when(is_render_in_tabs, |this| this.pt_2())
             .child(
                 div()
                     .id("tab-content")
@@ -1100,10 +1076,10 @@ impl TabPanel {
         // We must to split it to remove_panel, unless it will be crash by error:
         // Cannot update ui::dock::tab_panel::TabPanel while it is already being updated
         if is_same_tab {
-            self.detach_panel(panel.clone(), window, cx);
+            self.take_panel(panel.clone(), window, cx);
         } else {
             let _ = drag.tab_panel.update(cx, |view, cx| {
-                view.detach_panel(panel.clone(), window, cx);
+                view.take_panel(panel.clone(), window, cx);
                 view.remove_self_if_empty(window, cx);
             });
         }
@@ -1331,7 +1307,6 @@ impl Render for TabPanel {
         let focus_handle = self.focus_handle(cx);
         let active_panel = self.active_panel(cx);
         let state = TabState {
-            closable: self.closable(cx),
             draggable: self.draggable(cx),
             droppable: self.droppable(cx),
             zoomable: self.zoomable(cx),
