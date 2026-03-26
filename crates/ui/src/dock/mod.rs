@@ -588,6 +588,21 @@ impl DockArea {
         self
     }
 
+    /// Read the current panel style.
+    pub fn current_panel_style(&self) -> PanelStyle {
+        self.panel_style
+    }
+
+    /// Update the panel style at runtime.
+    pub fn set_panel_style(&mut self, style: PanelStyle, cx: &mut Context<Self>) {
+        if self.panel_style == style {
+            return;
+        }
+        self.panel_style = style;
+        cx.emit(DockEvent::LayoutChanged);
+        cx.notify();
+    }
+
     /// Set the builder used to construct tab context menus.
     pub fn set_tab_context_menu_builder<F>(&mut self, builder: F)
     where

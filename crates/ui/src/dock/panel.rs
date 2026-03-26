@@ -19,6 +19,8 @@ pub enum PanelStyle {
     /// Display the TabBar when there are multiple tabs, otherwise display the simple title.
     #[default]
     Auto,
+    /// Never display the built-in title/tab bar.
+    Hidden,
     /// Always display the tab bar.
     TabBar,
 }

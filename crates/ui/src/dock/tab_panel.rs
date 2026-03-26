@@ -1,15 +1,15 @@
 use std::sync::Arc;
 
 use gpui::{
-    App, AppContext, Context, DismissEvent, Div, DragMoveEvent, Empty, Entity,
-    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement,
-    Pixels, Render, ScrollHandle, SharedString, StatefulInteractiveElement, StyleRefinement,
-    Styled, WeakEntity, Window, div, prelude::FluentBuilder, px, relative, rems,
+    App, AppContext, Context, DismissEvent, Div, DragMoveEvent, Empty, Entity, EventEmitter,
+    FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement, Pixels, Render,
+    ScrollHandle, SharedString, StatefulInteractiveElement, StyleRefinement, Styled, WeakEntity,
+    Window, div, prelude::FluentBuilder, px, relative, rems,
 };
 use rust_i18n::t;
 
 use crate::{
-    ActiveTheme, AxisExt, Icon, IconName, Placement, Selectable, Size, Sizable,
+    ActiveTheme, AxisExt, Icon, IconName, Placement, Selectable, Sizable, Size,
     button::{Button, ButtonVariants as _},
     dock::PanelInfo,
     h_flex,
@@ -32,9 +32,9 @@ struct TabState {
 }
 
 #[derive(Clone)]
-pub(crate) struct DragPanel {
-    pub(crate) panel: Arc<dyn PanelView>,
-    pub(crate) tab_panel: Entity<TabPanel>,
+pub struct DragPanel {
+    pub panel: Arc<dyn PanelView>,
+    pub tab_panel: Entity<TabPanel>,
 }
 
 #[derive(Clone)]
@@ -47,7 +47,7 @@ pub struct TabContextMenuContext {
 }
 
 impl DragPanel {
-    pub(crate) fn new(panel: Arc<dyn PanelView>, tab_panel: Entity<TabPanel>) -> Self {
+    pub fn new(panel: Arc<dyn PanelView>, tab_panel: Entity<TabPanel>) -> Self {
         Self { panel, tab_panel }
     }
 }
@@ -217,6 +217,10 @@ impl TabPanel {
         self.active_ix
     }
 
+    pub fn dock_area(&self) -> Option<Entity<DockArea>> {
+        self.dock_area.upgrade()
+    }
+
     fn set_active_ix(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if ix == self.active_ix {
             return;
@@ -347,6 +351,18 @@ impl TabPanel {
         cx.emit(PanelEvent::LayoutChanged);
     }
 
+    pub fn take_panel_for_move(
+        &mut self,
+        panel: Arc<dyn PanelView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.take_panel(panel, window, cx);
+        self.remove_self_if_empty(window, cx);
+        cx.emit(PanelEvent::LayoutChanged);
+        cx.notify();
+    }
+
     fn panel_index(&self, panel: &Arc<dyn PanelView>) -> Option<usize> {
         let target_view = panel.view();
         self.panels.iter().position(|p| p.view() == target_view)
@@ -383,11 +399,7 @@ impl TabPanel {
         for item in to_close {
             self.detach_panel(item, window, cx);
         }
-        if let Some(ix) = self
-            .panels
-            .iter()
-            .position(|p| p.view() == keep_view)
-        {
+        if let Some(ix) = self.panels.iter().position(|p| p.view() == keep_view) {
             self.set_active_ix(ix, window, cx);
         }
         self.remove_self_if_empty(window, cx);
@@ -705,13 +717,17 @@ impl TabPanel {
 
         let panel_style = dock_area.read(cx).panel_style;
         let visible_panels = self.visible_panels(cx).collect::<Vec<_>>();
+        if !should_render_title_bar(panel_style) {
+            return div().into_any_element();
+        }
         let active_title_suffix = self
             .active_panel(cx)
             .and_then(|panel| panel.title_suffix(window, cx));
         let has_toolbar = self.zoomed
             || state.zoomable.map_or(false, |v| v.toolbar_visible())
             || self.toolbar_buttons(window, cx).is_some();
-        let show_suffix = active_title_suffix.is_some() || has_toolbar || right_dock_button.is_some();
+        let show_suffix =
+            active_title_suffix.is_some() || has_toolbar || right_dock_button.is_some();
 
         if visible_panels.len() == 1 && panel_style == PanelStyle::default() {
             let panel = visible_panels.get(0).unwrap();
@@ -898,11 +914,14 @@ impl TabPanel {
                         let context = tab_panel
                             .read(cx)
                             .menu_context(tab_panel.clone(), panel_for_menu.clone());
-                        let builder = tab_panel
-                            .read(cx)
-                            .dock_area
-                            .upgrade()
-                            .and_then(|dock_area| dock_area.read(cx).tab_context_menu_builder.clone());
+                        let builder =
+                            tab_panel
+                                .read(cx)
+                                .dock_area
+                                .upgrade()
+                                .and_then(|dock_area| {
+                                    dock_area.read(cx).tab_context_menu_builder.clone()
+                                });
 
                         match (context, builder) {
                             (Some(context), Some(builder)) => builder(menu, context, window, cx),
@@ -975,10 +994,12 @@ impl TabPanel {
         v_flex()
             .id("active-panel")
             .group("")
+            .relative()
             .flex_1()
             .child(
                 div()
                     .id("tab-content")
+                    .relative()
                     .overflow_y_scroll()
                     .overflow_x_hidden()
                     .flex_1()
@@ -1029,6 +1050,17 @@ impl TabPanel {
     ) {
         let bounds = drag.bounds;
         let position = drag.event.position;
+
+        // GPUI's on_drag_move keeps firing even after the pointer leaves the
+        // element, as long as the drag started under this element. Dock split
+        // placement is hover-driven, so ignore moves outside the content bounds.
+        if !bounds.contains(&position) {
+            if self.will_split_placement.is_some() {
+                self.will_split_placement = None;
+                cx.notify();
+            }
+            return;
+        }
 
         // Check the mouse position to determine the split direction
         if position.x < bounds.left() + bounds.size.width * 0.35 {
@@ -1291,6 +1323,13 @@ impl TabPanel {
     }
 }
 
+fn should_render_title_bar(panel_style: PanelStyle) -> bool {
+    match panel_style {
+        PanelStyle::Hidden => false,
+        PanelStyle::Auto | PanelStyle::TabBar => true,
+    }
+}
+
 impl Focusable for TabPanel {
     fn focus_handle(&self, cx: &App) -> gpui::FocusHandle {
         if let Some(active_panel) = self.active_panel(cx) {
@@ -1322,5 +1361,18 @@ impl Render for TabPanel {
             .bg(cx.theme().background)
             .child(self.render_title_bar(&state, window, cx))
             .child(self.render_active_panel(&state, window, cx))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_render_title_bar;
+    use crate::dock::PanelStyle;
+
+    #[test]
+    fn hidden_style_suppresses_title_bar_for_single_panel() {
+        assert!(!should_render_title_bar(PanelStyle::Hidden));
+        assert!(should_render_title_bar(PanelStyle::Auto));
+        assert!(should_render_title_bar(PanelStyle::TabBar));
     }
 }
