@@ -261,6 +261,16 @@ impl TabPanel {
         self.add_panel_with_active(panel, true, window, cx);
     }
 
+    /// Add a panel without stealing the current active tab.
+    pub fn add_panel_inactive(
+        &mut self,
+        panel: Arc<dyn PanelView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.add_panel_with_active(panel, false, window, cx);
+    }
+
     fn add_panel_with_active(
         &mut self,
         panel: Arc<dyn PanelView>,
@@ -301,11 +311,35 @@ impl TabPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.add_panel_at_with_active(panel, placement, size, true, window, cx);
+    }
+
+    /// Split and add a panel without stealing the current active panel.
+    pub fn add_panel_at_inactive(
+        &mut self,
+        panel: Arc<dyn PanelView>,
+        placement: Placement,
+        size: Option<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.add_panel_at_with_active(panel, placement, size, false, window, cx);
+    }
+
+    fn add_panel_at_with_active(
+        &mut self,
+        panel: Arc<dyn PanelView>,
+        placement: Placement,
+        size: Option<Pixels>,
+        active: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         cx.spawn_in(window, async move |view, cx| {
             cx.update(|window, cx| {
                 view.update(cx, |view, cx| {
                     view.will_split_placement = Some(placement);
-                    view.split_panel(panel, placement, size, window, cx)
+                    view.split_panel_with_active(panel, placement, size, active, window, cx)
                 })
                 .ok()
             })
@@ -1140,11 +1174,27 @@ impl TabPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.split_panel_with_active(panel, placement, size, true, window, cx);
+    }
+
+    fn split_panel_with_active(
+        &self,
+        panel: Arc<dyn PanelView>,
+        placement: Placement,
+        size: Option<Pixels>,
+        active: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let dock_area = self.dock_area.clone();
         // wrap the panel in a TabPanel
         let new_tab_panel = cx.new(|cx| Self::new(None, dock_area.clone(), window, cx));
         new_tab_panel.update(cx, |view, cx| {
-            view.add_panel(panel, window, cx);
+            if active {
+                view.add_panel(panel, window, cx);
+            } else {
+                view.add_panel_inactive(panel, window, cx);
+            }
         });
 
         let stack_panel = match self.stack_panel.as_ref().and_then(|panel| panel.upgrade()) {
