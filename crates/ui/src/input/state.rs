@@ -20,19 +20,21 @@ use sum_tree::Bias;
 use unicode_segmentation::*;
 
 use super::{
-    DisplayMap, blink_cursor::BlinkCursor, change::Change, element::TextElement,
+    DisplayMap, MASK_CHAR, blink_cursor::BlinkCursor, change::Change, element::TextElement,
     mask_pattern::MaskPattern, mode::InputMode, number_input,
 };
 use crate::Size;
 use crate::actions::{SelectDown, SelectLeft, SelectRight, SelectUp};
 use crate::highlighter::DiagnosticSet;
+#[cfg(not(target_family = "wasm"))]
+use crate::highlighter::LanguageRegistry;
 use crate::input::blink_cursor::CURSOR_WIDTH;
 use crate::input::movement::MoveDirection;
 use crate::input::{
     HoverDefinition, InlineCompletion, Lsp, Position, RopeExt as _, Selection,
     display_map::LineLayout,
     element::RIGHT_MARGIN,
-    popovers::{ContextMenu, DiagnosticPopover, HoverPopover, MouseContextMenu},
+    popovers::{ContextMenu, DiagnosticPopover, HoverPopover, InputContextMenu},
     search::{self, SearchPanel},
 };
 use crate::{Root, history::History};
@@ -323,6 +325,8 @@ pub struct InputState {
     pub(super) clean_on_escape: bool,
     pub(super) soft_wrap: bool,
     pub(super) show_whitespaces: bool,
+    /// This flag tells the renderer to prefer the end of the current visual line.
+    pub(crate) cursor_line_end_affinity: bool,
     pub(super) pattern: Option<regex::Regex>,
     pub(super) validate: Option<Box<dyn Fn(&str, &mut Context<Self>) -> bool + 'static>>,
     pub(crate) scroll_handle: ScrollHandle,
@@ -339,8 +343,10 @@ pub struct InputState {
     /// Popover
     diagnostic_popover: Option<Entity<DiagnosticPopover>>,
     /// Completion/CodeAction context menu
-    pub(super) context_menu: Option<ContextMenu>,
-    pub(super) mouse_context_menu: Entity<MouseContextMenu>,
+    pub(super) context_menu_content: Option<ContextMenu>,
+    pub(super) context_menu: Entity<InputContextMenu>,
+    pub(super) enable_context_menu: bool,
+
     /// A flag to indicate if we are currently inserting a completion item.
     pub(super) completion_inserting: bool,
     pub(super) hover_popover: Option<Entity<HoverPopover>>,
@@ -397,7 +403,7 @@ impl InputState {
         ];
 
         let text_style = window.text_style();
-        let mouse_context_menu = MouseContextMenu::new(cx.entity(), window, cx);
+        let mouse_context_menu = InputContextMenu::new(cx.entity(), window, cx);
 
         Self {
             focus_handle: focus_handle.clone(),
@@ -435,8 +441,9 @@ impl InputState {
             text_align: TextAlign::Left,
             lsp: Lsp::default(),
             diagnostic_popover: None,
-            context_menu: None,
-            mouse_context_menu,
+            context_menu_content: None,
+            context_menu: mouse_context_menu,
+            enable_context_menu: true,
             completion_inserting: false,
             hover_popover: None,
             hover_definition: HoverDefinition::default(),
@@ -446,6 +453,7 @@ impl InputState {
             _context_menu_task: Task::ready(Ok(())),
             _pending_update: false,
             inline_completion: InlineCompletion::default(),
+            cursor_line_end_affinity: false,
         }
     }
 
@@ -488,6 +496,14 @@ impl InputState {
         let language: SharedString = language.into();
         self.mode = InputMode::code_editor(language);
         self.searchable = true;
+        self
+    }
+
+    /// Sets whether the context menu that shows on right-click is enabled.
+    ///
+    /// The context menu is enabled by default.
+    pub fn context_menu(mut self, enable: bool) -> Self {
+        self.enable_context_menu = enable;
         self
     }
 
@@ -579,10 +595,12 @@ impl InputState {
             InputMode::CodeEditor {
                 language,
                 highlighter,
+                parse_task,
                 ..
             } => {
                 *language = new_language.into();
                 *highlighter.borrow_mut() = None;
+                parse_task.borrow_mut().take();
             }
             _ => {}
         }
@@ -591,8 +609,13 @@ impl InputState {
 
     fn reset_highlighter(&mut self, cx: &mut Context<Self>) {
         match &mut self.mode {
-            InputMode::CodeEditor { highlighter, .. } => {
+            InputMode::CodeEditor {
+                highlighter,
+                parse_task,
+                ..
+            } => {
                 *highlighter.borrow_mut() = None;
+                parse_task.borrow_mut().take();
             }
             _ => {}
         }
@@ -640,7 +663,7 @@ impl InputState {
         for (vi, line) in last_layout.lines.iter().enumerate() {
             let prev_lines_offset = last_layout.visible_line_byte_offsets[vi];
             let local_offset = offset.saturating_sub(prev_lines_offset);
-            if let Some(pos) = line.position_for_index(local_offset, last_layout) {
+            if let Some(pos) = line.position_for_index(local_offset, last_layout, false) {
                 let sub_line_index = (pos.y / line_height) as usize;
                 let adjusted_pos = point(pos.x + last_layout.line_number_width, pos.y + y_offset);
                 return (vi, sub_line_index, Some(adjusted_pos));
@@ -1025,24 +1048,59 @@ impl InputState {
             .unwrap_or(self.text.len())
     }
 
-    /// Get start of line byte offset of cursor
+    /// Get start of line byte offset of cursor.
+    ///
+    /// When soft wrap is active, first press goes to visual line start,
+    /// second press (already at visual start) goes to logical line start.
     pub(super) fn start_of_line(&self) -> usize {
         if self.mode.is_single_line() {
             return 0;
         }
 
         let row = self.text.offset_to_point(self.cursor()).row;
-        self.text.line_start_offset(row)
+        let logical_start = self.text.line_start_offset(row);
+
+        if self.soft_wrap && self.mode.is_code_editor() {
+            let wrap_point = self.display_map.offset_to_wrap_display_point(self.cursor());
+            if let Some(line) = self.display_map.lines().get(row)
+                && let Some(range) = line.wrapped_lines.get(wrap_point.local_row)
+            {
+                let visual_start = logical_start + range.start;
+                if self.cursor() != visual_start {
+                    return visual_start;
+                }
+            }
+        }
+
+        logical_start
     }
 
-    /// Get end of line byte offset of cursor
+    /// Get end of line byte offset of cursor.
+    ///
+    /// When soft wrap is active, first press goes to visual line end,
+    /// second press (already at visual end) goes to logical line end.
     pub(super) fn end_of_line(&self) -> usize {
         if self.mode.is_single_line() {
             return self.text.len();
         }
 
         let row = self.text.offset_to_point(self.cursor()).row;
-        self.text.line_end_offset(row)
+        let logical_start = self.text.line_start_offset(row);
+        let logical_end = self.text.line_end_offset(row);
+
+        if self.soft_wrap && self.mode.is_code_editor() {
+            let wrap_point = self.display_map.offset_to_wrap_display_point(self.cursor());
+            if let Some(line) = self.display_map.lines().get(row)
+                && let Some(range) = line.wrapped_lines.get(wrap_point.local_row)
+            {
+                let visual_end = logical_start + range.end;
+                if self.cursor() != visual_end {
+                    return visual_end;
+                }
+            }
+        }
+
+        logical_end
     }
 
     /// Get start line of selection start or end (The min value).
@@ -1319,7 +1377,9 @@ impl InputState {
 
         // Show Mouse context menu
         if event.button == MouseButton::Right {
-            self.handle_right_click_menu(event, offset, window, cx);
+            if self.enable_context_menu {
+                self.handle_right_click_menu(event, offset, window, cx);
+            }
             return;
         }
 
@@ -1479,7 +1539,7 @@ impl InputState {
             .get(row.saturating_sub(last_layout.visible_range.start))
         {
             // Check to scroll horizontally and soft wrap lines
-            if let Some(pos) = line.position_for_index(point.column, last_layout) {
+            if let Some(pos) = line.position_for_index(point.column, last_layout, false) {
                 let bounds_width = bounds.size.width - last_layout.line_number_width;
                 let col_offset_x = pos.x;
                 row_offset_y += pos.y;
@@ -1659,7 +1719,7 @@ impl InputState {
                 let local_index = line_layout.closest_index_for_x(pos.x, last_layout);
                 let index = line_start_offset + local_index;
                 return if self.masked {
-                    self.text.char_index_to_offset(index)
+                    self.text.char_index_to_offset(index / MASK_CHAR.len_utf8())
                 } else {
                     index.min(self.text.len())
                 };
@@ -1669,14 +1729,15 @@ impl InputState {
             if let Some(local_index) = line_layout.closest_index_for_position(pos, last_layout) {
                 let index = line_start_offset + local_index;
                 return if self.masked {
-                    self.text.char_index_to_offset(index)
+                    self.text.char_index_to_offset(index / MASK_CHAR.len_utf8())
                 } else {
                     index.min(self.text.len())
                 };
             } else if pos.y < px(0.) {
                 // Mouse is above this line, return start of this line
                 return if self.masked {
-                    self.text.char_index_to_offset(line_start_offset)
+                    self.text
+                        .char_index_to_offset(line_start_offset / MASK_CHAR.len_utf8())
                 } else {
                     line_start_offset
                 };
@@ -1686,12 +1747,7 @@ impl InputState {
         }
 
         // Mouse is below all visible lines, return end of text
-        let index = self.text.len();
-        if self.masked {
-            self.text.char_index_to_offset(index)
-        } else {
-            index
-        }
+        self.text.len()
     }
 
     /// Returns a y offsetted point for the line origin.
@@ -1832,7 +1888,7 @@ impl InputState {
 
         self.hover_popover = None;
         self.diagnostic_popover = None;
-        self.context_menu = None;
+        self.context_menu_content = None;
         self.clear_inline_completion(cx);
         self.blink_cursor.update(cx, |cursor, cx| {
             cursor.stop(cx);
@@ -1959,7 +2015,10 @@ impl InputState {
         self.text.slice(range)
     }
 
-    pub(crate) fn range_to_bounds(&self, range: &Range<usize>) -> Option<Bounds<Pixels>> {
+    /// Return the rendered bounds for a UTF-8 byte range in the current input contents.
+    ///
+    /// Returns `None` when the requested range is not currently laid out or visible.
+    pub fn range_to_bounds(&self, range: &Range<usize>) -> Option<Bounds<Pixels>> {
         let Some(last_layout) = self.last_layout.as_ref() else {
             return None;
         };
@@ -2050,6 +2109,98 @@ impl InputState {
             edit_range.start..new_end,
             &self.text,
         );
+    }
+
+    /// Spawn a background parse after the synchronous parse timed out.
+    ///
+    /// Dropping the returned `Task` (stored in `parse_task`) cancels the
+    /// parse, which naturally debounces rapid edits.
+    #[cfg(not(target_family = "wasm"))]
+    fn dispatch_background_parse(
+        pending: super::mode::PendingBackgroundParse,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let highlighter_rc = pending.highlighter;
+        let parse_task_rc = pending.parse_task;
+        let language = pending.language;
+        let text = pending.text;
+
+        let old_tree = highlighter_rc
+            .borrow()
+            .as_ref()
+            .and_then(|h| h.tree().cloned());
+
+        // Extract injection parse data on the main thread before spawning, so that
+        // compute_injection_layers can also run on the background thread.
+        let injection_data = highlighter_rc
+            .borrow()
+            .as_ref()
+            .and_then(|h| h.injection_parse_data());
+
+        let text_for_apply = text.clone();
+        let task = cx.spawn_in(window, async move |entity, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let Some(config) = LanguageRegistry::singleton().language(&language) else {
+                        return None;
+                    };
+
+                    let mut parser = tree_sitter::Parser::new();
+                    if parser.set_language(&config.language).is_err() {
+                        return None;
+                    }
+
+                    let new_tree = parser.parse_with_options(
+                        &mut |offset, _| {
+                            if offset >= text.len() {
+                                ""
+                            } else {
+                                let (chunk, chunk_byte_ix) = text.chunk(offset);
+                                &chunk[offset - chunk_byte_ix..]
+                            }
+                        },
+                        old_tree.as_ref(),
+                        None,
+                    )?;
+
+                    // Compute injection layers in the background to avoid blocking the
+                    // main thread with combined-injection parsing (e.g. PHP, HTML+JS/CSS).
+                    let injection_layers = if let Some(data) = injection_data {
+                        crate::highlighter::SyntaxHighlighter::compute_injection_layers(
+                            data, &new_tree, &text,
+                        )
+                    } else {
+                        Default::default()
+                    };
+
+                    Some((new_tree, injection_layers))
+                })
+                .await;
+
+            if let Some((new_tree, injection_layers)) = result {
+                if let Some(h) = highlighter_rc.borrow_mut().as_mut() {
+                    h.apply_background_tree(new_tree, &text_for_apply, injection_layers);
+                }
+
+                // Trigger re-render so the new highlights are displayed.
+                _ = entity.update(cx, |_, cx| {
+                    cx.notify();
+                });
+            }
+        });
+
+        parse_task_rc.borrow_mut().replace(task);
+    }
+
+    #[cfg(target_family = "wasm")]
+    fn dispatch_background_parse(
+        _pending: super::mode::PendingBackgroundParse,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        // No-op
     }
 }
 
@@ -2149,8 +2300,14 @@ impl EntityInputHandler for InputState {
             .adjust_folds_for_edit(&old_text, &range, new_text);
         self.display_map
             .on_text_changed(&self.text, &range, &Rope::from(new_text), cx);
-        self.mode
+
+        let bg = self
+            .mode
             .update_highlighter(&range, &self.text, &new_text, true, cx);
+        if let Some(bg) = bg {
+            Self::dispatch_background_parse(bg, window, cx);
+        }
+
         self.update_fold_candidates_incremental(&range, new_text);
         self.lsp.update(&self.text, window, cx);
         self.selected_range = (new_offset..new_offset).into();
@@ -2208,8 +2365,14 @@ impl EntityInputHandler for InputState {
             .adjust_folds_for_edit(&old_text, &range, new_text);
         self.display_map
             .on_text_changed(&self.text, &range, &Rope::from(new_text), cx);
-        self.mode
+
+        let bg = self
+            .mode
             .update_highlighter(&range, &self.text, &new_text, true, cx);
+        if let Some(bg) = bg {
+            Self::dispatch_background_parse(bg, window, cx);
+        }
+
         self.update_fold_candidates_incremental(&range, new_text);
         self.lsp.update(&self.text, window, cx);
         if new_text.is_empty() {
@@ -2257,17 +2420,21 @@ impl EntityInputHandler for InputState {
             let index_offset = last_layout.visible_line_byte_offsets[vi];
 
             if start_origin.is_none() {
-                if let Some(p) =
-                    line.position_for_index(range.start.saturating_sub(index_offset), last_layout)
-                {
+                if let Some(p) = line.position_for_index(
+                    range.start.saturating_sub(index_offset),
+                    last_layout,
+                    false,
+                ) {
                     start_origin = Some(p + point(px(0.), y_offset));
                 }
             }
 
             if end_origin.is_none() {
-                if let Some(p) =
-                    line.position_for_index(range.end.saturating_sub(index_offset), last_layout)
-                {
+                if let Some(p) = line.position_for_index(
+                    range.end.saturating_sub(index_offset),
+                    last_layout,
+                    false,
+                ) {
                     end_origin = Some(p + point(px(0.), y_offset));
                 }
             }
@@ -2316,8 +2483,13 @@ impl Focusable for InputState {
 impl Render for InputState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self._pending_update {
-            self.mode
+            let bg = self
+                .mode
                 .update_highlighter(&(0..0), &self.text, "", false, cx);
+            if let Some(bg) = bg {
+                Self::dispatch_background_parse(bg, window, cx);
+            }
+
             self.update_fold_candidates();
             self.lsp.update(&self.text, window, cx);
             self._pending_update = false;
@@ -2331,7 +2503,7 @@ impl Render for InputState {
             .overflow_x_hidden()
             .child(TextElement::new(cx.entity().clone()).placeholder(self.placeholder.clone()))
             .children(self.diagnostic_popover.clone())
-            .children(self.context_menu.as_ref().map(|menu| menu.render()))
+            .children(self.context_menu_content.as_ref().map(|menu| menu.render()))
             .children(self.hover_popover.clone())
     }
 }

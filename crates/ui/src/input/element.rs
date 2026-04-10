@@ -23,6 +23,18 @@ pub(super) const RIGHT_MARGIN: Pixels = px(10.);
 pub(super) const LINE_NUMBER_RIGHT_MARGIN: Pixels = px(10.);
 const FOLD_ICON_WIDTH: Pixels = px(14.);
 const FOLD_ICON_HITBOX_WIDTH: Pixels = px(18.);
+const MAX_HIGHLIGHT_LINE_LENGTH: usize = 10_000;
+
+use super::MASK_CHAR;
+
+/// Convert a byte offset in the original text to a byte offset in the masked display string.
+///
+/// The masked string consists of `MASK_CHAR` repeated once per character in the original text.
+/// Since `MASK_CHAR` may be multi-byte in UTF-8, the byte offset in the masked string is
+/// `char_index * MASK_CHAR.len_utf8()`.
+fn masked_display_offset(text: &Rope, original_offset: usize) -> usize {
+    text.offset_to_char_index(original_offset) * MASK_CHAR.len_utf8()
+}
 
 /// Layout information for fold icons.
 struct FoldIconLayout {
@@ -95,10 +107,9 @@ impl TextElement {
 
         let mut cursor = state.cursor();
         if state.masked {
-            // Because masked use `*`, 1 char with 1 byte.
-            selected_range.start = state.text.offset_to_char_index(selected_range.start);
-            selected_range.end = state.text.offset_to_char_index(selected_range.end);
-            cursor = state.text.offset_to_char_index(cursor);
+            selected_range.start = masked_display_offset(&state.text, selected_range.start);
+            selected_range.end = masked_display_offset(&state.text, selected_range.end);
+            cursor = masked_display_offset(&state.text, cursor);
         }
 
         let mut current_row = None;
@@ -145,20 +156,22 @@ impl TextElement {
             if let Some(line) = line_layout {
                 if cursor_pos.is_none() {
                     let offset = cursor.saturating_sub(prev_lines_offset);
-                    if let Some(pos) = line.position_for_index(offset, last_layout) {
+                    if let Some(pos) =
+                        line.position_for_index(offset, last_layout, state.cursor_line_end_affinity)
+                    {
                         current_row = Some(row);
                         cursor_pos = Some(line_origin + pos);
                     }
                 }
                 if cursor_start.is_none() {
                     let offset = selected_range.start.saturating_sub(prev_lines_offset);
-                    if let Some(pos) = line.position_for_index(offset, last_layout) {
+                    if let Some(pos) = line.position_for_index(offset, last_layout, false) {
                         cursor_start = Some(line_origin + pos);
                     }
                 }
                 if cursor_end.is_none() {
                     let offset = selected_range.end.saturating_sub(prev_lines_offset);
-                    if let Some(pos) = line.position_for_index(offset, last_layout) {
+                    if let Some(pos) = line.position_for_index(offset, last_layout, false) {
                         cursor_end = Some(line_origin + pos);
                     }
                 }
@@ -314,17 +327,25 @@ impl TextElement {
 
             let line_origin = point(px(0.), offset_y);
 
-            let line_cursor_start =
-                line.position_for_index(start_ix.saturating_sub(prev_lines_offset), last_layout);
-            let line_cursor_end =
-                line.position_for_index(end_ix.saturating_sub(prev_lines_offset), last_layout);
+            let line_cursor_start = line.position_for_index(
+                start_ix.saturating_sub(prev_lines_offset),
+                last_layout,
+                false,
+            );
+            let line_cursor_end = line.position_for_index(
+                end_ix.saturating_sub(prev_lines_offset),
+                last_layout,
+                false,
+            );
 
             if line_cursor_start.is_some() || line_cursor_end.is_some() {
                 let start = line_cursor_start
-                    .unwrap_or_else(|| line.position_for_index(0, last_layout).unwrap());
+                    .unwrap_or_else(|| line.position_for_index(0, last_layout, false).unwrap());
 
-                let end = line_cursor_end
-                    .unwrap_or_else(|| line.position_for_index(line.len(), last_layout).unwrap());
+                let end = line_cursor_end.unwrap_or_else(|| {
+                    line.position_for_index(line.len(), last_layout, false)
+                        .unwrap()
+                });
 
                 // Split the selection into multiple items
                 let wrapped_lines =
@@ -497,9 +518,8 @@ impl TextElement {
         }
 
         if state.masked {
-            // Because masked use `*`, 1 char with 1 byte.
-            selected_range.start = state.text.offset_to_char_index(selected_range.start);
-            selected_range.end = state.text.offset_to_char_index(selected_range.end);
+            selected_range.start = masked_display_offset(&state.text, selected_range.start);
+            selected_range.end = masked_display_offset(&state.text, selected_range.end);
         }
 
         let (start_ix, end_ix) = if selected_range.start < selected_range.end {
@@ -1030,19 +1050,55 @@ impl TextElement {
 
         let mut styles = Vec::with_capacity(visible_buffer_lines.len());
 
-        for &buffer_line in visible_buffer_lines {
-            let line_start = text.line_start_offset(buffer_line);
-            let line = text.slice_line(buffer_line);
-            let line_len = if is_multi_line {
+        // Helper to flush a contiguous range of lines
+        let flush_range = |start_line: usize, end_line: usize, skip: bool, styles: &mut Vec<_>| {
+            let byte_start = text.line_start_offset(start_line);
+            let byte_end = if is_multi_line {
                 // +1 for `\n`
-                line.len() + 1
+                text.line_start_offset(end_line + 1)
             } else {
-                line.len()
+                text.line_end_offset(end_line)
+            };
+            let range_styles = if skip {
+                vec![(byte_start..byte_end, HighlightStyle::default())]
+            } else {
+                highlighter.styles(&(byte_start..byte_end), &cx.theme().highlight_theme)
             };
 
-            let range = line_start..line_start + line_len;
-            let line_styles = highlighter.styles(&range, &cx.theme().highlight_theme);
-            styles = gpui::combine_highlights(styles, line_styles).collect();
+            *styles = gpui::combine_highlights(styles.clone(), range_styles).collect();
+        };
+
+        // Group contiguous visible lines into ranges and call styles() once per range
+        let mut visible_iter = visible_buffer_lines.iter().peekable();
+        let mut range_start: Option<usize> = None;
+
+        while let Some(&line) = visible_iter.next() {
+            // Check if this line is too long for highlighting
+            let line_len = text.slice_line(line).len();
+            if line_len > MAX_HIGHLIGHT_LINE_LENGTH {
+                // Flush any accumulated range first
+                if let Some(start) = range_start.take() {
+                    flush_range(start, line - 1, false, &mut styles);
+                }
+
+                flush_range(line, line, true, &mut styles);
+                continue;
+            }
+
+            range_start.get_or_insert(line);
+
+            // Check if next line is contiguous, if so keep accumulating
+            if visible_iter
+                .peek()
+                .map(|&&next| next == line + 1)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+
+            // Flush the contiguous range
+            let start_line = range_start.take().unwrap();
+            flush_range(start_line, line, false, &mut styles);
         }
 
         let diagnostic_styles = diagnostics.styles_for_range(&visible_byte_range, cx);
@@ -1222,8 +1278,8 @@ impl Element for TextElement {
         let is_empty = text.len() == 0;
         let placeholder = self.placeholder.clone();
 
-        let mut bounds = bounds;
-
+        let text_style = window.text_style();
+        let fg = text_style.color;
         let (display_text, text_color) = if is_empty {
             (
                 &Rope::from(placeholder.as_str()),
@@ -1231,19 +1287,18 @@ impl Element for TextElement {
             )
         } else if state.masked {
             (
-                &Rope::from("*".repeat(text.chars().count())),
-                cx.theme().foreground,
+                &Rope::from(MASK_CHAR.to_string().repeat(text.chars().count())),
+                fg,
             )
         } else {
-            (&text, cx.theme().foreground)
+            (&text, fg)
         };
-
-        let text_style = window.text_style();
 
         // Calculate the width of the line numbers
         let (line_number_width, line_number_len) =
             Self::layout_line_numbers(&state, &text, text_size, &text_style, window);
 
+        let mut bounds = bounds;
         let wrap_width = if multi_line && state.soft_wrap {
             Some(bounds.size.width - line_number_width - RIGHT_MARGIN)
         } else {
@@ -1255,12 +1310,29 @@ impl Element for TextElement {
             .map(|&bl| state.text.line_start_offset(bl))
             .collect();
 
+        // For password input (masked: true), convert byte offsets to masked display byte offsets so that
+        // layout_match_range and position_for_index work in the correct coordinate space.
+        let (visible_line_byte_offsets, visible_range_offset) = if state.masked {
+            let offsets = visible_line_byte_offsets
+                .iter()
+                .map(|&o| masked_display_offset(&text, o))
+                .collect();
+            let range_offset = masked_display_offset(&text, visible_start_offset)
+                ..masked_display_offset(&text, visible_end_offset);
+            (offsets, range_offset)
+        } else {
+            (
+                visible_line_byte_offsets,
+                visible_start_offset..visible_end_offset,
+            )
+        };
+
         let mut last_layout = LastLayout {
             visible_range,
             visible_buffer_lines,
             visible_line_byte_offsets,
             visible_top,
-            visible_range_offset: visible_start_offset..visible_end_offset,
+            visible_range_offset,
             line_height,
             wrap_width,
             line_number_width,
@@ -1589,17 +1661,6 @@ impl Element for TextElement {
         let origin = bounds.origin;
 
         let invisible_top_padding = prepaint.last_layout.visible_top;
-
-        let mut mask_offset_y = px(0.);
-        let state = self.state.read(cx);
-        if state.masked && state.text.len() > 0 {
-            // Move down offset for vertical centering the *****
-            if cfg!(target_os = "macos") {
-                mask_offset_y = px(3.);
-            } else {
-                mask_offset_y = px(2.5);
-            }
-        }
         let active_line_color = cx.theme().highlight_theme.style.editor_active_line;
 
         // Paint active line
@@ -1660,7 +1721,7 @@ impl Element for TextElement {
         }
 
         // Paint text with inline completion ghost line support
-        let mut offset_y = mask_offset_y + invisible_top_padding;
+        let mut offset_y = invisible_top_padding;
         let ghost_lines = &prepaint.ghost_lines;
         let has_ghost_lines = !ghost_lines.is_empty();
 
